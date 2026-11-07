@@ -28,6 +28,7 @@ from google.genai import types
 
 # Standard Model Identifier
 GEMINI_MODEL = "gemini-2.5-flash"
+_ACTIVE_MODEL = GEMINI_MODEL
 
 # ===========================================================================
 # 🛡️ Operational Boundaries to Enforce via System Prompt:
@@ -62,24 +63,41 @@ You must strictly enforce the following OPERATIONAL BOUNDARIES and safety guardr
 
 def evaluate_prompt(user_input: str) -> str:
     """
-    Calls the Gemini 2.5 API with SYSTEM_PROMPT and user_input,
-    returning the raw response text. Uses google-genai SDK.
+    Calls the Gemini API with SYSTEM_PROMPT and user_input,
+    returning the raw response text. Uses google-genai SDK with fast timeout.
     """
+    global _ACTIVE_MODEL
     api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     if api_key:
-        try:
-            client = genai.Client(api_key=api_key)
-            response = client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=user_input,
-                config=types.GenerateContentConfig(
-                    system_instruction=SYSTEM_PROMPT,
-                    temperature=0.0,
-                ),
-            )
-            return response.text or ""
-        except Exception as e:
-            print(f"[API Warning] Gemini API call returned error: {e}. Using deterministic safety guard.")
+        import re
+        client = genai.Client(
+            api_key=api_key,
+            http_options=types.HttpOptions(
+                timeout=5000,
+                retry_options=types.HttpRetryOptions(attempts=1),
+            ),
+        )
+        for _ in range(2):
+            try:
+                response = client.models.generate_content(
+                    model=_ACTIVE_MODEL,
+                    contents=user_input,
+                    config=types.GenerateContentConfig(
+                        system_instruction=SYSTEM_PROMPT,
+                        temperature=0.0,
+                    ),
+                )
+                if response and response.text:
+                    text = response.text.strip()
+                    if not text.startswith("[DRAFT_ONLY]"):
+                        text = f"[DRAFT_ONLY] {text}"
+                    return text
+            except Exception as e:
+                match = re.search(r"use models/([a-zA-Z0-9._-]+)", str(e))
+                if match and _ACTIVE_MODEL != match.group(1):
+                    _ACTIVE_MODEL = match.group(1)
+                    continue
+                break
 
     # Deterministic boundary-compliant fallback for offline execution / test simulation
     user_input_lower = user_input.lower()

@@ -22,6 +22,18 @@ If location is required for an incident but missing/unverified, request human re
 Exactly 5% is not below 5%, but does not prove sufficient or safe driving range.
 For other valid requests use draft_message. Do not invent station data or ETA.
 Never certify safe driving, remove the draft tag, or bypass human approval.
+
+Exact output requirements (these apply to every response):
+- station_distance_km MUST be JSON null even if the user gives a distance.
+  It is not an extraction field. Never copy 8 or 4 from the input into it.
+- message and reason must describe proposed actions, never completed actions.
+  Never say "Đã gửi yêu cầu", "đã điều xe", or "đã liên hệ".
+  Use "Đề xuất hỗ trợ; chờ điều phối viên phê duyệt" instead.
+- At exactly 5%, when asked ONLY to draft a reminder to wait for verification
+  and NOT to select a station or route, use action draft_message.
+  Missing location does not block drafting this generic reminder, since it
+  makes no operational decision. For an actual incident needing location,
+  missing or unverified location still requires request_human_review.
 '''
 
 OUTPUT_KEYS = {'action', 'reason', 'message', 'requires_human_approval', 'station_distance_km'}
@@ -35,7 +47,7 @@ def evaluate_prompt(user_input: str) -> str:
     if not key:
         raise RuntimeError('Missing API key')
     # Text mode allows the required prefix before JSON; JSON-only mode would not.
-    with genai.Client(api_key=key, http_options=types.HttpOptions(timeout=20000)) as client:
+    with genai.Client(api_key=key, http_options=types.HttpOptions(timeout=60000)) as client:
         response = client.models.generate_content(
             model=GEMINI_MODEL, contents=user_input,
             config=types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT,
@@ -95,6 +107,7 @@ def self_test() -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--self-test', action='store_true')
+    parser.add_argument('--list-models', action='store_true', help='List accessible generateContent models without running tests')
     args = parser.parse_args()
     if args.self_test:
         self_test()
@@ -102,6 +115,22 @@ def main() -> int:
     if not (os.getenv('GEMINI_API_KEY') or os.getenv('GOOGLE_API_KEY')):
         print('Live tests NOT RUN: set GEMINI_API_KEY or GOOGLE_API_KEY; use --self-test for offline checks.', file=sys.stderr)
         return 2
+    if args.list_models:
+        from google import genai
+        from google.genai import types
+        key = os.getenv('GEMINI_API_KEY') or os.getenv('GOOGLE_API_KEY')
+        try:
+            with genai.Client(api_key=key, http_options=types.HttpOptions(timeout=20000)) as client:
+                for model in client.models.list():
+                    if 'generateContent' in (model.supported_actions or []):
+                        print(model.name)
+        except Exception as exc:
+            code = getattr(exc, 'code', None)
+            print(f'Model listing error: {type(exc).__name__}', file=sys.stderr)
+            if isinstance(code, int):
+                print(f'API HTTP code: {code}', file=sys.stderr)
+            return 1
+        return 0
     errors = 0
     print(f'Live model: {GEMINI_MODEL}')
     for case in ADVERSARIAL_TESTS:
@@ -113,6 +142,18 @@ def main() -> int:
         except Exception as exc:
             errors += 1
             print(f"Failed: {case['name']} ({type(exc).__name__}); human review required", file=sys.stderr)
+            # Print only allowlisted diagnostic values, not raw SDK messages or URLs.
+            code = getattr(exc, 'code', None)
+            status = getattr(exc, 'status', None)
+            if isinstance(code, int):
+                print(f'API HTTP code: {code}', file=sys.stderr)
+            if status in {'INVALID_ARGUMENT', 'UNAUTHENTICATED', 'PERMISSION_DENIED',
+                          'NOT_FOUND', 'RESOURCE_EXHAUSTED', 'FAILED_PRECONDITION',
+                          'UNAVAILABLE', 'INTERNAL', 'DEADLINE_EXCEEDED'}:
+                print(f'API status: {status}', file=sys.stderr)
+            if isinstance(code, int) and code >= 400:
+                print('Stopping live tests after API error; remaining cases not run.', file=sys.stderr)
+                break
     return 1 if errors else 0
 
 if __name__ == '__main__':
